@@ -543,9 +543,10 @@ const Adzan = ({ isDarkMode = false }) => {
   };
 
   // ============= NOTIFICATION FUNCTIONS =============
-  
-  const sendNotification = (title, body) => {
-    if ('Notification' in window && Notification.permission === 'granted') {
+
+const sendNotification = (title, body) => {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
       const notification = new Notification(title, {
         body: body,
         icon: '/logo.png',
@@ -566,33 +567,73 @@ const Adzan = ({ isDarkMode = false }) => {
       }, 30000);
 
       return notification;
+    } catch (error) {
+      console.error('Error showing notification:', error);
+      showToast('Gagal menampilkan notifikasi', 'error');
     }
-  };
+  }
+};
 
-  const requestNotificationPermission = () => {
-    if (!('Notification' in window)) {
-      showToast('Browser tidak mendukung notifikasi', 'error');
-      return;
-    }
+const requestNotificationPermission = () => {
+  if (!('Notification' in window)) {
+    showToast('Browser tidak mendukung notifikasi', 'error');
+    return;
+  }
 
-    Notification.requestPermission().then(async permission => {
-      setNotificationPermission(permission);
-      await saveToDatabase('notifications_enabled', permission === 'granted');
+  // Cek status permission saat ini
+  const currentPermission = Notification.permission;
+  
+  if (currentPermission === 'granted') {
+    setNotificationPermission('granted');
+    saveToDatabase('notifications_enabled', true);
+    showToast('Notifikasi sudah aktif', 'success');
+    
+    // Kirim notifikasi test
+    setTimeout(() => {
+      sendNotification(
+        'Notifikasi Aktif! 🎉',
+        'Sistem notifikasi waktu shalat telah aktif. Anda akan menerima pemberitahuan waktu shalat.'
+      );
+    }, 500);
+    
+    return;
+  }
+  
+  if (currentPermission === 'denied') {
+    showToast(
+      'Izin notifikasi ditolak. Silakan aktifkan melalui pengaturan browser Anda.', 
+      'error'
+    );
+    return;
+  }
+
+  // Minta izin jika statusnya 'default'
+  setIsLoading(true);
+  
+  Notification.requestPermission().then(async permission => {
+    setIsLoading(false);
+    setNotificationPermission(permission);
+    await saveToDatabase('notifications_enabled', permission === 'granted');
+    
+    if (permission === 'granted') {
+      showToast('Notifikasi diaktifkan. Anda akan diberitahu saat waktu shalat.', 'success');
       
-      if (permission === 'granted') {
-        showToast('Notifikasi diaktifkan. Anda akan diberitahu saat waktu shalat.', 'success');
-        
-        setTimeout(() => {
-          sendNotification(
-            'Notifikasi Aktif! 🎉',
-            `Sistem notifikasi waktu shalat telah aktif. Anda akan menerima pemberitahuan untuk:\n• 15 menit sebelum waktu shalat\n• 5 menit sebelum waktu shalat\n• Saat waktu shalat tiba\n• Tarhim sebelum Subuh`
-          );
-        }, 1000);
-      } else if (permission === 'denied') {
-        showToast('Izin notifikasi ditolak. Anda tidak akan menerima pengingat waktu shalat.', 'error');
-      }
-    });
-  };
+      // Kirim notifikasi test setelah izin diberikan
+      setTimeout(() => {
+        sendNotification(
+          'Notifikasi Aktif! 🎉',
+          'Sistem notifikasi waktu shalat telah aktif. Anda akan menerima pemberitahuan untuk:\n• 15 menit sebelum waktu shalat\n• 5 menit sebelum waktu shalat\n• Saat waktu shalat tiba\n• Tarhim sebelum Subuh'
+        );
+      }, 1000);
+    } else if (permission === 'denied') {
+      showToast('Izin notifikasi ditolak. Anda tidak akan menerima pengingat waktu shalat.', 'error');
+    }
+  }).catch(error => {
+    setIsLoading(false);
+    console.error('Error requesting notification permission:', error);
+    showToast('Gagal meminta izin notifikasi', 'error');
+  });
+};
 
   // ============= AUDIO CONTROL FUNCTIONS =============
   
@@ -992,177 +1033,211 @@ const Adzan = ({ isDarkMode = false }) => {
         }}
       />
       
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-40">
-          <div className={`rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto ${
-            isDarkMode ? 'bg-gray-800' : 'bg-white'
-          }`}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
-                Pengaturan Adzan
-              </h3>
-              <button
-                onClick={() => setShowSettings(false)}
-                className={`p-2 rounded-lg ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-              >
-                <X size={20} className={isDarkMode ? 'text-gray-300' : ''} />
-              </button>
-            </div>
-            
-            <div className="space-y-4">
-              {/* Database Status */}
-              <div className={`p-3 rounded-lg ${
-                dbStatus === 'connected' ? 'bg-green-900/20 text-green-400' : 
-                dbStatus === 'synced' ? 'bg-blue-900/20 text-blue-400' : 
-                'bg-yellow-900/20 text-yellow-400'
-              }`}>
-                <div className="flex items-center gap-2">
-                  <Database size={16} />
-                  <span className="text-sm font-medium">
-                    {dbStatus === 'connected' ? 'Terhubung ke database' : 
-                     dbStatus === 'synced' ? 'Data tersimpan' : 
-                     dbStatus === 'loading' ? 'Memuat data...' : 
-                     'Gagal terhubung'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Notification Settings */}
-              <div className={`p-3 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Notifikasi Waktu Shalat</div>
-                    <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                      {notificationPermission === 'granted' 
-                        ? 'Aktif - Anda akan diberitahu saat waktu shalat' 
-                        : notificationPermission === 'denied'
-                        ? 'Ditolak - Aktifkan di pengaturan browser'
-                        : 'Menunggu izin'}
-                    </div>
-                  </div>
-                  <button
-                    onClick={requestNotificationPermission}
-                    className={`px-3 py-1.5 text-sm rounded-lg ${
-                      notificationPermission === 'granted'
-                        ? 'bg-green-500 text-white'
-                        : isDarkMode
-                        ? 'bg-blue-600 text-white hover:bg-blue-700'
-                        : 'bg-blue-500 text-white hover:bg-blue-600'
-                    }`}
-                  >
-                    {notificationPermission === 'granted' ? '✓ Aktif' : 'Aktifkan'}
-                  </button>
-                </div>
-                
-                <div className={`mt-3 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                  <div className="flex items-center gap-1 mb-1">
-                    <BellRing size={12} />
-                    <span>Anda akan menerima notifikasi untuk:</span>
-                  </div>
-                  <ul className="list-disc pl-4 space-y-1">
-                    <li>15 menit sebelum setiap waktu shalat</li>
-                    <li>5 menit sebelum setiap waktu shalat</li>
-                    <li>Saat waktu shalat tiba</li>
-                    <li>Tarhim sebelum Subuh (jika diaktifkan)</li>
-                  </ul>
-                </div>
-              </div>
-
-              <div>
-                <label className={`block text-sm font-medium mb-1 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                  Durasi Tarhim Sebelum Subuh (menit)
-                </label>
-                <div className="flex items-center gap-2">
-                  <Timer size={16} className={isDarkMode ? 'text-gray-500' : 'text-gray-400'} />
-                  <input
-                    type="range"
-                    min="5"
-                    max="60"
-                    step="5"
-                    value={tarhimDuration}
-                    onChange={(e) => handleTarhimDurationChange(parseInt(e.target.value))}
-                    className="w-full accent-emerald-500"
-                  />
-                  <span className={`text-sm font-medium min-w-[3rem] ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                    {tarhimDuration} mnt
-                  </span>
-                </div>
-                <p className={`text-xs mt-1 ${isDarkMode ? 'text-gray-500' : 'text-gray-500'}`}>
-                  Tarhim akan dimulai {tarhimDuration} menit sebelum waktu subuh
-                </p>
-              </div>
-              
-              <div className={`flex items-center justify-between p-3 rounded-lg ${
-                isDarkMode ? 'bg-gray-700' : 'bg-gray-50'
-              }`}>
-                <div>
-                  <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Auto Tarhim</div>
-                  <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                    Putar tarhim sebelum subuh
-                  </div>
-                </div>
-                <button
-                  onClick={handleAutoTarhimToggle}
-                  className={`relative w-12 h-6 rounded-full transition-colors ${autoTarhim 
-                    ? 'bg-emerald-500' 
-                    : isDarkMode ? 'bg-gray-600' : 'bg-gray-300'
-                  }`}
-                >
-                  <div className={`absolute w-5 h-5 rounded-full top-0.5 transition-transform ${
-                    autoTarhim ? 'left-7' : 'left-1'
-                  } ${isDarkMode ? 'bg-gray-800' : 'bg-white'}`} />
-                </button>
-              </div>
-              
-              <div className={`flex items-center justify-between p-3 rounded-lg ${
-                isDarkMode ? 'bg-gray-700' : 'bg-gray-50'
-              }`}>
-                <div>
-                  <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Auto Adzan</div>
-                  <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                    Putar adzan otomatis
-                  </div>
-                </div>
-                <button
-                  onClick={handleAutoPlayToggle}
-                  className={`relative w-12 h-6 rounded-full transition-colors ${autoPlay 
-                    ? 'bg-emerald-500' 
-                    : isDarkMode ? 'bg-gray-600' : 'bg-gray-300'
-                  }`}
-                >
-                  <div className={`absolute w-5 h-5 rounded-full top-0.5 transition-transform ${
-                    autoPlay ? 'left-7' : 'left-1'
-                  } ${isDarkMode ? 'bg-gray-800' : 'bg-white'}`} />
-                </button>
-              </div>
-            </div>
-            
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowSettings(false)}
-                className={`flex-1 py-2.5 border rounded-lg font-medium transition-colors ${
-                  isDarkMode 
-                    ? 'border-gray-600 text-gray-300 hover:bg-gray-700' 
-                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
-                }`}
-              >
-                Batal
-              </button>
-              <button
-                onClick={() => {
-                  setShowSettings(false);
-                  showToast('Pengaturan telah disimpan', 'success');
-                }}
-                className="flex-1 bg-emerald-500 text-white py-2.5 rounded-lg font-medium hover:bg-emerald-600 transition-colors flex items-center justify-center gap-2"
-              >
-                <Save size={18} />
-                Simpan
-              </button>
-            </div>
+     {/* Settings Modal - DIPERBAIKI dengan z-index lebih tinggi */}
+{showSettings && (
+  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[9999]"> {/* z-index ditingkatkan */}
+    <div className={`rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto ${
+      isDarkMode ? 'bg-gray-800' : 'bg-white'
+    }`}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
+          Pengaturan Adzan
+        </h3>
+        <button
+          onClick={() => setShowSettings(false)}
+          className={`p-2 rounded-lg ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
+        >
+          <X size={20} className={isDarkMode ? 'text-gray-300' : ''} />
+        </button>
+      </div>
+      
+      <div className="space-y-4">
+        {/* Database Status */}
+        <div className={`p-3 rounded-lg ${
+          dbStatus === 'connected' ? 'bg-green-900/20 text-green-400' : 
+          dbStatus === 'synced' ? 'bg-blue-900/20 text-blue-400' : 
+          'bg-yellow-900/20 text-yellow-400'
+        }`}>
+          <div className="flex items-center gap-2">
+            <Database size={16} />
+            <span className="text-sm font-medium">
+              {dbStatus === 'connected' ? 'Terhubung ke database' : 
+               dbStatus === 'synced' ? 'Data tersimpan' : 
+               dbStatus === 'loading' ? 'Memuat data...' : 
+               'Gagal terhubung'}
+            </span>
           </div>
         </div>
-      )}
+
+        {/* Notification Settings - DIPERBAIKI tombolnya */}
+        <div className={`p-3 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Notifikasi Waktu Shalat</div>
+              <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                {notificationPermission === 'granted' 
+                  ? 'Aktif - Anda akan diberitahu saat waktu shalat' 
+                  : notificationPermission === 'denied'
+                  ? 'Ditolak - Aktifkan di pengaturan browser'
+                  : 'Klik tombol untuk mengaktifkan notifikasi'}
+              </div>
+            </div>
+            <button
+              onClick={requestNotificationPermission}
+              disabled={isLoading}
+              className={`px-3 py-1.5 text-sm rounded-lg flex items-center gap-1 ${
+                notificationPermission === 'granted'
+                  ? 'bg-green-500 text-white cursor-default'
+                  : notificationPermission === 'denied'
+                  ? 'bg-gray-400 text-white cursor-not-allowed'
+                  : isDarkMode
+                  ? 'bg-blue-600 text-white hover:bg-blue-700'
+                  : 'bg-blue-500 text-white hover:bg-blue-600'
+              } ${isLoading ? 'opacity-50 cursor-wait' : ''}`}
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  <span>Memuat...</span>
+                </>
+              ) : notificationPermission === 'granted' ? (
+                '✓ Aktif'
+              ) : notificationPermission === 'denied' ? (
+                'Diblokir'
+              ) : (
+                'Aktifkan'
+              )}
+            </button>
+          </div>
+          
+          {/* Informasi notifikasi */}
+          {notificationPermission !== 'denied' && (
+            <div className={`mt-3 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+              <div className="flex items-center gap-1 mb-1">
+                <BellRing size={12} />
+                <span>Anda akan menerima notifikasi untuk:</span>
+              </div>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>15 menit sebelum setiap waktu shalat</li>
+                <li>5 menit sebelum setiap waktu shalat</li>
+                <li>Saat waktu shalat tiba</li>
+                <li>Tarhim sebelum Subuh (jika diaktifkan)</li>
+              </ul>
+            </div>
+          )}
+          
+          {/* Pesan jika ditolak */}
+          {notificationPermission === 'denied' && (
+            <div className="mt-3 p-2 bg-yellow-900/30 text-yellow-300 rounded text-xs">
+              <AlertCircle size={12} className="inline mr-1" />
+              Notifikasi diblokir oleh browser. Untuk mengaktifkan:
+              <ol className="list-decimal pl-4 mt-1">
+                <li>Klik ikon gembok di address bar</li>
+                <li>Cari "Notifikasi" atau "Notifications"</li>
+                <li>Ubah menjadi "Izinkan" atau "Allow"</li>
+                <li>Refresh halaman ini</li>
+              </ol>
+            </div>
+          )}
+        </div>
+
+        {/* Durasi Tarhim */}
+        <div>
+          <label className={`block text-sm font-medium mb-1 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+            Durasi Tarhim Sebelum Subuh (menit)
+          </label>
+          <div className="flex items-center gap-2">
+            <Timer size={16} className={isDarkMode ? 'text-gray-500' : 'text-gray-400'} />
+            <input
+              type="range"
+              min="5"
+              max="60"
+              step="5"
+              value={tarhimDuration}
+              onChange={(e) => handleTarhimDurationChange(parseInt(e.target.value))}
+              className="w-full accent-emerald-500"
+            />
+            <span className={`text-sm font-medium min-w-[3rem] ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+              {tarhimDuration} mnt
+            </span>
+          </div>
+          <p className={`text-xs mt-1 ${isDarkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+            Tarhim akan dimulai {tarhimDuration} menit sebelum waktu subuh
+          </p>
+        </div>
+        
+        {/* Auto Tarhim Toggle */}
+        <div className={`flex items-center justify-between p-3 rounded-lg ${
+          isDarkMode ? 'bg-gray-700' : 'bg-gray-50'
+        }`}>
+          <div>
+            <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Auto Tarhim</div>
+            <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+              Putar tarhim sebelum subuh
+            </div>
+          </div>
+          <button
+            onClick={handleAutoTarhimToggle}
+            className={`relative w-12 h-6 rounded-full transition-colors ${autoTarhim 
+              ? 'bg-emerald-500' 
+              : isDarkMode ? 'bg-gray-600' : 'bg-gray-300'
+            }`}
+          >
+            <div className={`absolute w-5 h-5 rounded-full bg-white top-0.5 transition-transform ${
+              autoTarhim ? 'left-7' : 'left-1'
+            }`} />
+          </button>
+        </div>
+        
+        {/* Auto Adzan Toggle */}
+        <div className={`flex items-center justify-between p-3 rounded-lg ${
+          isDarkMode ? 'bg-gray-700' : 'bg-gray-50'
+        }`}>
+          <div>
+            <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Auto Adzan</div>
+            <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+              Putar adzan otomatis
+            </div>
+          </div>
+          <button
+            onClick={handleAutoPlayToggle}
+            className={`relative w-12 h-6 rounded-full transition-colors ${autoPlay 
+              ? 'bg-emerald-500' 
+              : isDarkMode ? 'bg-gray-600' : 'bg-gray-300'
+            }`}
+          >
+            <div className={`absolute w-5 h-5 rounded-full bg-white top-0.5 transition-transform ${
+              autoPlay ? 'left-7' : 'left-1'
+            }`} />
+          </button>
+        </div>
+      </div>
+      
+      <div className="flex gap-3 mt-6">
+        <button
+          onClick={() => setShowSettings(false)}
+          className={`flex-1 py-2.5 border rounded-lg font-medium transition-colors ${
+            isDarkMode 
+              ? 'border-gray-600 text-gray-300 hover:bg-gray-700' 
+              : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          Tutup
+        </button>
+        <button
+          onClick={() => {
+            setShowSettings(false);
+            showToast('Pengaturan telah disimpan', 'success');
+          }}
+          className="flex-1 bg-emerald-500 text-white py-2.5 rounded-lg font-medium hover:bg-emerald-600 transition-colors flex items-center justify-center gap-2"
+        >
+          <Save size={18} />
+          Selesai
+        </button>
+      </div>
+    </div>
+  </div>
+)}
       
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
