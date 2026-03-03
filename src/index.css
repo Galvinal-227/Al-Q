@@ -1,0 +1,82 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Scheherazade+New:wght@400;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-800;
+  }
+  
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    @apply w-2;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-primary-300 rounded-full;
+  }
+}
+
+@layer components {
+  .ayah-arabic {
+    font-family: 'Scheherazade New', serif;
+    direction: rtl;
+    font-size: 1.8rem;
+    line-height: 2.2;
+  }
+  
+  .surah-card {
+    @apply bg-white rounded-xl shadow-md hover:shadow-lg transition-shadow duration-300;
+  }
+  
+  .nav-button {
+    @apply flex items-center gap-2 px-4 py-2 rounded-lg;
+    @apply bg-primary-100 text-primary-700 hover:bg-primary-200;
+    @apply transition-colors duration-200;
+  }
+  
+  .primary-button {
+    @apply px-6 py-3 rounded-lg font-medium;
+    @apply bg-primary-500 text-white hover:bg-primary-600;
+    @apply transition-colors duration-200 focus:outline-none focus:ring-2;
+    @apply focus:ring-primary-300 focus:ring-offset-2;
+  }
+  
+  .secondary-button {
+    @apply px-6 py-3 rounded-lg font-medium;
+    @apply bg-white text-primary-700 border border-primary-300;
+    @apply hover:bg-primary-50 transition-colors duration-200;
+  }
+  
+  .input-field {
+    @apply w-full px-4 py-2 border border-gray-300 rounded-lg;
+    @apply focus:ring-2 focus:ring-primary-500 focus:border-transparent;
+    @apply placeholder-gray-400 transition-colors duration-200;
+  }
+  
+  .card {
+    @apply bg-white rounded-xl shadow-md p-6;
+  }
+  
+  .badge {
+    @apply px-3 py-1 rounded-full text-sm font-medium;
+  }
+  
+  .badge-primary {
+    @apply bg-primary-100 text-primary-700;
+  }
+  
+  .badge-success {
+    @apply bg-emerald-100 text-emerald-700;
+  }
+  
+  .badge-warning {
+    @apply bg-amber-100 text-amber-700;
+  }
+}

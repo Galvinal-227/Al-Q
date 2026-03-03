@@ -1,0 +1,38 @@
+{
+  "short_name": "Quran Digital",
+  "name": "Al-Quran Digital - Baca Quran Online",
+  "description": "Aplikasi Al-Quran lengkap dengan terjemahan, audio, dan notifikasi waktu shalat",
+  "icons": [
+    {
+      "src": "/logo192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/logo512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#059669",
+  "display": "standalone",
+  "scope": "/",
+  "theme_color": "#059669",
+  "shortcuts": [
+    {
+      "name": "Baca Quran",
+      "short_name": "Quran",
+      "description": "Baca Al-Quran dengan terjemahan",
+      "url": "/?tab=quran",
+      "icons": [{ "src": "/logo192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Jadwal Shalat",
+      "short_name": "Shalat",
+      "description": "Lihat jadwal shalat dan adzan",
+      "url": "/?tab=adhan",
+      "icons": [{ "src": "/clock192.png", "sizes": "192x192" }]
+    }
+  ]
+}
