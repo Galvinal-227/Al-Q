@@ -7,11 +7,13 @@ import {
   Save, X, MapPin, Calendar, Globe,
   Music, Timer, RefreshCw, Navigation,
   CheckCircle, AlertCircle, WifiOff,
-  BellRing, HelpCircle, BarChart3, Database
+  BellRing, HelpCircle, BarChart3, Database,
+  ExternalLink, Smartphone, BellOff
 } from 'lucide-react';
 import { dbService } from '../service/databaseService';
+import { messaging, getToken, onMessage } from '../firebase/firebase';
 
-// ============= MODAL COMPONENT WITH PORTAL =============
+// ============= MODAL COMPONENT =============
 const Modal = ({ isOpen, onClose, children, isDarkMode }) => {
   useEffect(() => {
     if (isOpen) {
@@ -19,10 +21,7 @@ const Modal = ({ isOpen, onClose, children, isDarkMode }) => {
     } else {
       document.body.style.overflow = 'unset';
     }
-
-    return () => {
-      document.body.style.overflow = 'unset';
-    };
+    return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
 
   if (!isOpen) return null;
@@ -30,27 +29,14 @@ const Modal = ({ isOpen, onClose, children, isDarkMode }) => {
   return ReactDOM.createPortal(
     <div 
       className="fixed inset-0 flex items-center justify-center"
-      style={{
-        zIndex: 999999,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0
-      }}
+      style={{ zIndex: 999999, backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
       onClick={onClose}
     >
       <div 
         className={`rounded-xl p-6 w-full max-w-md max-h-[90vh] overflow-y-auto ${
           isDarkMode ? 'bg-gray-800' : 'bg-white'
         }`}
-        style={{
-          position: 'relative',
-          zIndex: 1000000,
-          maxWidth: '90%',
-          margin: 'auto'
-        }}
+        style={{ position: 'relative', zIndex: 1000000, maxWidth: '90%', margin: 'auto' }}
         onClick={(e) => e.stopPropagation()}
       >
         {children}
@@ -90,36 +76,30 @@ const Adzan = ({ isDarkMode = false }) => {
   const [audioLoaded, setAudioLoaded] = useState(false);
   const [tarhimLoaded, setTarhimLoaded] = useState(false);
   const [lastPlayedPrayer, setLastPlayedPrayer] = useState(null);
-  const [showDebug, setShowDebug] = useState(false);
+  const [fcmToken, setFcmToken] = useState(null);
+  const [isPwaInstalled, setIsPwaInstalled] = useState(false);
+  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
   
-  // ============= DATABASE STATES =============
+  // Stats states
   const [dailyStats, setDailyStats] = useState(null);
-  const [weeklyStats, setWeeklyStats] = useState([]);
   const [lastAdzan, setLastAdzan] = useState(null);
   const [lastTarhim, setLastTarhim] = useState(null);
   const [recentActivities, setRecentActivities] = useState([]);
   const [isLoadingDb, setIsLoadingDb] = useState(false);
   const [showStats, setShowStats] = useState(false);
-  const [dbStatus, setDbStatus] = useState('disconnected');
   
   const audioRef = useRef(null);
   const tarhimAudioRef = useRef(null);
   const timerRef = useRef(null);
   const countdownRef = useRef(null);
   const toastTimeoutRef = useRef(null);
-  const notificationCheckRef = useRef(null);
-  const dbSyncRef = useRef(null);
+  const deferredPrompt = useRef(null);
 
   // ============= DATABASE FUNCTIONS =============
-  
   const loadAllFromDatabase = async () => {
     setIsLoadingDb(true);
-    setDbStatus('loading');
-    
     try {
       const settings = await dbService.getUserSettings();
-      console.log('📦 Loaded settings:', settings);
-      
       if (settings) {
         setVolume(settings.volume || 70);
         setIsMuted(settings.is_muted || false);
@@ -139,16 +119,11 @@ const Adzan = ({ isDarkMode = false }) => {
       
       const stats = await dbService.getCompleteStats();
       setDailyStats(stats.daily);
-      setWeeklyStats(stats.weekly);
       setLastAdzan(stats.lastAdzan);
       setLastTarhim(stats.lastTarhim);
       setRecentActivities(stats.recentActivities);
-      
-      setDbStatus('connected');
     } catch (error) {
       console.error('❌ Error loading from database:', error);
-      setDbStatus('error');
-      showToast('Gagal memuat data dari database', 'error');
     } finally {
       setIsLoadingDb(false);
     }
@@ -159,21 +134,14 @@ const Adzan = ({ isDarkMode = false }) => {
       const update = {};
       update[key] = value;
       await dbService.updateUserSettings(update);
-      setDbStatus('synced');
-      
-      setTimeout(() => {
-        if (dbStatus === 'synced') setDbStatus('connected');
-      }, 2000);
     } catch (error) {
       console.error('❌ Error saving to database:', error);
-      setDbStatus('error');
     }
   };
 
   const logAdzanToDatabase = async (prayerName, isAuto = true) => {
     try {
       await dbService.logAdzanPlayed(prayerName, isAuto, volume);
-      
       const stats = await dbService.getCompleteStats();
       setDailyStats(stats.daily);
       setLastAdzan(stats.lastAdzan);
@@ -186,7 +154,6 @@ const Adzan = ({ isDarkMode = false }) => {
   const logTarhimToDatabase = async (isAuto = true, stoppedEarly = false) => {
     try {
       await dbService.logTarhimPlayed(isAuto, volume, tarhimDuration, stoppedEarly);
-      
       const stats = await dbService.getCompleteStats();
       setDailyStats(stats.daily);
       setLastTarhim(stats.lastTarhim);
@@ -196,34 +163,134 @@ const Adzan = ({ isDarkMode = false }) => {
     }
   };
 
-  // ============= NOTIFICATION FUNCTIONS =============
+  // ============= FIREBASE NOTIFICATIONS =============
+  const setupFirebaseNotifications = async () => {
+    try {
+      // Minta permission
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      
+      if (permission === 'granted') {
+        // Dapatkan FCM token
+        const token = await getToken(messaging, {
+          vapidKey: 'YOUR_VAPID_KEY' // Dapat dari Firebase Console
+        });
+        
+        if (token) {
+          setFcmToken(token);
+          console.log('✅ FCM Token:', token);
+          
+          // Kirim token ke server (opsional)
+          // await saveTokenToServer(token);
+        }
+        
+        // Listen for foreground messages
+        onMessage(messaging, (payload) => {
+          console.log('📨 Message received in foreground:', payload);
+          
+          // Tampilkan notifikasi sendiri
+          if (payload.notification) {
+            showToast(payload.notification.body || 'Waktu shalat telah tiba', 'success');
+            
+            // Jika aplikasi sedang terbuka, putar adzan
+            if (document.visibilityState === 'visible') {
+              const prayerName = payload.data?.prayer || 'subuh';
+              const prayer = prayerTimes.find(p => 
+                p.name.toLowerCase().includes(prayerName.toLowerCase())
+              );
+              if (prayer) {
+                playAdhan(prayer);
+              } else {
+                playAdhan();
+              }
+            }
+          }
+        });
+      }
+    } catch (error) {
+      console.error('❌ Firebase messaging error:', error);
+    }
+  };
 
-  const sendNotification = (title, body) => {
+  // ============= PWA INSTALL PROMPT =============
+  useEffect(() => {
+    // Cek apakah sudah diinstall sebagai PWA
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches;
+    setIsPwaInstalled(isStandalone);
+    
+    // Listen for install prompt
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt.current = e;
+      setShowInstallPrompt(true);
+    });
+    
+    window.addEventListener('appinstalled', () => {
+      setIsPwaInstalled(true);
+      setShowInstallPrompt(false);
+      showToast('Aplikasi berhasil diinstall!', 'success');
+    });
+  }, []);
+
+  const handleInstallPWA = async () => {
+    if (!deferredPrompt.current) return;
+    
+    deferredPrompt.current.prompt();
+    const { outcome } = await deferredPrompt.current.userChoice;
+    
+    if (outcome === 'accepted') {
+      console.log('✅ User accepted install');
+    }
+    
+    deferredPrompt.current = null;
+    setShowInstallPrompt(false);
+  };
+
+  // ============= NOTIFICATION FUNCTIONS =============
+  const sendLocalNotification = (title, body, data = {}) => {
     if ('Notification' in window && Notification.permission === 'granted') {
       try {
         const notification = new Notification(title, {
           body: body,
-          icon: '/logo.png',
+          icon: '/icon.png',
           badge: '/logo.png',
           tag: `adzan-${Date.now()}`,
           requireInteraction: true,
-          vibrate: [200, 100, 200, 100, 200],
-          silent: false
+          vibrate: [200, 100, 200],
+          data: data,
+          actions: [
+            {
+              action: 'open',
+              title: 'Buka Aplikasi'
+            },
+            {
+              action: 'dismiss',
+              title: 'Tutup'
+            }
+          ]
         });
 
-        notification.onclick = () => {
+        notification.onclick = (event) => {
+          event.preventDefault();
           window.focus();
+          
+          // Cek action
+          if (event.action === 'open') {
+            // Jika ini notifikasi adzan, putar audio
+            if (data.type === 'adzan') {
+              const prayer = prayerTimes.find(p => p.id === data.prayerId);
+              if (prayer) {
+                playAdhan(prayer);
+              }
+            }
+          }
+          
           notification.close();
         };
-
-        setTimeout(() => {
-          notification.close();
-        }, 30000);
 
         return notification;
       } catch (error) {
         console.error('Error showing notification:', error);
-        showToast('Gagal menampilkan notifikasi', 'error');
       }
     }
   };
@@ -237,41 +304,21 @@ const Adzan = ({ isDarkMode = false }) => {
     setIsLoading(true);
     
     try {
-      const currentPermission = Notification.permission;
-      
-      if (currentPermission === 'granted') {
-        setNotificationPermission('granted');
-        await saveToDatabase('notifications_enabled', true);
-        showToast('Notifikasi sudah aktif', 'success');
-        
-        setTimeout(() => {
-          sendNotification(
-            'Notifikasi Aktif! 🎉',
-            'Sistem notifikasi waktu shalat telah aktif.'
-          );
-        }, 500);
-        return;
-      }
-      
-      if (currentPermission === 'denied') {
-        showToast(
-          'Izin notifikasi ditolak. Silakan aktifkan melalui pengaturan browser.', 
-          'error'
-        );
-        return;
-      }
-
       const permission = await Notification.requestPermission();
       setNotificationPermission(permission);
-      await saveToDatabase('notifications_enabled', permission === 'granted');
       
       if (permission === 'granted') {
         showToast('Notifikasi diaktifkan', 'success');
         
+        // Setup Firebase
+        await setupFirebaseNotifications();
+        
+        // Test notification
         setTimeout(() => {
-          sendNotification(
+          sendLocalNotification(
             'Notifikasi Aktif! 🎉',
-            'Sistem notifikasi waktu shalat telah aktif.'
+            'Anda akan menerima notifikasi waktu shalat',
+            { type: 'test' }
           );
         }, 1000);
       } else {
@@ -286,7 +333,6 @@ const Adzan = ({ isDarkMode = false }) => {
   };
 
   // ============= UTILITY FUNCTIONS =============
-  
   const formatTime = (date) => {
     if (!date) return "--:--";
     return date.toLocaleTimeString('id-ID', {
@@ -354,7 +400,6 @@ const Adzan = ({ isDarkMode = false }) => {
   };
 
   // ============= PRAYER TIME CALCULATIONS =============
-  
   const calculatePrayerTimes = () => {
     const now = new Date();
     
@@ -435,8 +480,52 @@ const Adzan = ({ isDarkMode = false }) => {
     return icons[id];
   };
 
-  // ============= TIME CHECKERS =============
-  
+  // ============= TIME CHECKERS (REALISTIC) =============
+  const checkAdhanTime = () => {
+    if (!autoPlay) return;
+    
+    const now = new Date();
+    const currentHours = now.getHours();
+    const currentMinutes = now.getMinutes();
+    const currentSeconds = now.getSeconds();
+    
+    // Cek setiap detik ke-0
+    if (currentSeconds !== 0) return;
+    
+    prayerTimes.forEach(prayer => {
+      const [prayerHours, prayerMinutes] = prayer.time.split(':').map(Number);
+      
+      if (currentHours === prayerHours && currentMinutes === prayerMinutes) {
+        const prayerKey = `${prayer.id}-${new Date().toDateString()}`;
+        
+        if (lastPlayedPrayer !== prayerKey) {
+          console.log(`🕌 Waktu ${prayer.name} (${prayer.time}) tiba!`);
+          
+          // KIRIM NOTIFIKASI (selalu bisa, bahkan browser ditutup)
+          sendLocalNotification(
+            `Waktu ${prayer.name}`,
+            `Sudah masuk waktu ${prayer.name} (${prayer.time}). Klik untuk mendengarkan adzan.`,
+            { type: 'adzan', prayerId: prayer.id, prayerName: prayer.name }
+          );
+          
+          // PLAY AUDIO (HANYA JIKA APLIKASI TERBUKA)
+          if (document.visibilityState === 'visible') {
+            setTimeout(() => {
+              playAdhan(prayer);
+              setLastPlayedPrayer(prayerKey);
+            }, 100);
+          } else {
+            console.log('📱 Aplikasi di background - hanya notifikasi');
+            // Tidak bisa putar audio, hanya notifikasi
+          }
+          
+          showToast(`Waktu ${prayer.name} telah tiba`, 'success');
+          logAdzanToDatabase(prayer.name, true);
+        }
+      }
+    });
+  };
+
   const checkTarhimTime = () => {
     if (!autoTarhim) return;
     if (!tarhimStartTime) return;
@@ -453,190 +542,46 @@ const Adzan = ({ isDarkMode = false }) => {
     
     if (currentHours === tarhimHours && currentMinutes === tarhimMinutes && !isTarhimPlaying) {
       console.log(`🎵 Waktu tarhim tiba! (${formatTarhimTime()})`);
-      startTarhim();
-      logTarhimToDatabase(true, false);
-      showToast(`Tarhim dimulai, menuju waktu Subuh`, 'info');
       
-      if (notificationPermission === 'granted') {
-        sendNotification('Tarhim Dimulai', `Tarhim sebelum Subuh telah dimulai. Bersiaplah untuk shalat!`);
+      // KIRIM NOTIFIKASI
+      sendLocalNotification(
+        'Tarhim Dimulai',
+        `Tarhim sebelum Subuh telah dimulai. Klik untuk mendengarkan.`,
+        { type: 'tarhim' }
+      );
+      
+      // PLAY AUDIO (HANYA JIKA APLIKASI TERBUKA)
+      if (document.visibilityState === 'visible') {
+        startTarhim();
+        logTarhimToDatabase(true, false);
+        showToast(`Tarhim dimulai, menuju waktu Subuh`, 'info');
+      } else {
+        console.log('📱 Aplikasi di background - hanya notifikasi tarhim');
+        // Tidak bisa putar audio
       }
     }
-  };
-
-  const checkAdhanTime = () => {
-    if (!autoPlay) return;
-    
-    const now = new Date();
-    const currentHours = now.getHours();
-    const currentMinutes = now.getMinutes();
-    const currentSeconds = now.getSeconds();
-    
-    if (currentSeconds !== 0) return;
-    
-    prayerTimes.forEach(prayer => {
-      const [prayerHours, prayerMinutes] = prayer.time.split(':').map(Number);
-      
-      if (currentHours === prayerHours && currentMinutes === prayerMinutes && !isPlaying) {
-        const prayerKey = `${prayer.id}-${new Date().toDateString()}`;
-        
-        if (lastPlayedPrayer !== prayerKey) {
-          console.log(`🕌 Waktu ${prayer.name} (${prayer.time}) tiba!`);
-          
-          if (prayer.id === 'fajr' && isTarhimPlaying) {
-            stopTarhim();
-          }
-          
-          setTimeout(() => {
-            playAdhan(prayer);
-            setLastPlayedPrayer(prayerKey);
-          }, 100);
-          
-          showToast(`Waktu ${prayer.name} telah tiba`, 'success');
-          
-          if (notificationPermission === 'granted') {
-            sendNotification(
-              `Waktu ${prayer.name}`, 
-              `Sudah masuk waktu ${prayer.name} (${prayer.time}). Ayo shalat berjamaah!`
-            );
-          }
-        }
-      }
-    });
-    
-    const fajrTime = useManualTimes ? manualTimes.fajr : getDefaultTimes().fajr;
-    const [fajrHours, fajrMinutes] = fajrTime.split(':').map(Number);
-    
-    if (currentHours === fajrHours && currentMinutes === fajrMinutes && isTarhimPlaying) {
-      console.log(`🕌 Waktu Subuh tiba, menghentikan tarhim...`);
-      stopTarhim();
-    }
-  };
-
-  const checkPrayerNotifications = () => {
-    if (notificationPermission !== 'granted') return;
-    
-    const now = new Date();
-    const currentHours = now.getHours();
-    const currentMinutes = now.getMinutes();
-    
-    prayerTimes.forEach(prayer => {
-      const [prayerHours, prayerMinutes] = prayer.time.split(':').map(Number);
-      
-      let reminderHour = prayerHours;
-      let reminderMinute = prayerMinutes - 15;
-      
-      if (reminderMinute < 0) {
-        reminderHour -= 1;
-        reminderMinute += 60;
-      }
-      
-      if (reminderHour >= 0 && currentHours === reminderHour && currentMinutes === reminderMinute) {
-        sendNotification(
-          `Persiapan ${prayer.name}`,
-          `15 menit lagi waktu ${prayer.name} (${prayer.time}). Siapkan diri untuk shalat.`
-        );
-      }
-      
-      reminderHour = prayerHours;
-      reminderMinute = prayerMinutes - 5;
-      
-      if (reminderMinute < 0) {
-        reminderHour -= 1;
-        reminderMinute += 60;
-      }
-      
-      if (reminderHour >= 0 && currentHours === reminderHour && currentMinutes === reminderMinute) {
-        sendNotification(
-          `Menjelang ${prayer.name}`,
-          `5 menit lagi waktu ${prayer.name}. Siapkan wudhu dan tempat shalat.`
-        );
-      }
-    });
-    
-    if (autoTarhim && tarhimStartTime) {
-      const tarhimHours = tarhimStartTime.getHours();
-      const tarhimMinutes = tarhimStartTime.getMinutes();
-      
-      if (currentHours === tarhimHours && currentMinutes === tarhimMinutes) {
-        sendNotification(
-          'Tarhim Dimulai',
-          `Tarhim sebelum Subuh telah dimulai. Dengarkan dan persiapkan diri untuk shalat Subuh.`
-        );
-      }
-      
-      let reminderHour = tarhimHours;
-      let reminderMinute = tarhimMinutes - 5;
-      
-      if (reminderMinute < 0) {
-        reminderHour -= 1;
-        reminderMinute += 60;
-      }
-      
-      if (reminderHour >= 0 && currentHours === reminderHour && currentMinutes === reminderMinute) {
-        sendNotification(
-          'Persiapan Tarhim',
-          `5 menit lagi tarhim sebelum Subuh dimulai. Siapkan diri untuk ibadah.`
-        );
-      }
-    }
-  };
-
-  const updateCountdowns = () => {
-    const now = new Date();
-    
-    const updatedTimes = prayerTimes.map(prayer => {
-      const newTimeLeft = Math.floor((prayer.fullTime - now) / 1000);
-      
-      if (newTimeLeft < 0) {
-        const newPrayerDate = new Date(prayer.fullTime);
-        newPrayerDate.setDate(newPrayerDate.getDate() + 1);
-        const updatedTimeLeft = Math.floor((newPrayerDate - now) / 1000);
-        
-        return {
-          ...prayer,
-          fullTime: newPrayerDate,
-          timeLeft: updatedTimeLeft
-        };
-      }
-      
-      return {
-        ...prayer,
-        timeLeft: newTimeLeft
-      };
-    }).sort((a, b) => a.fullTime - b.fullTime);
-    
-    setPrayerTimes(updatedTimes);
-    
-    const next = updatedTimes.find(p => p.timeLeft > 0) || updatedTimes[0];
-    setNextPrayer(next);
   };
 
   // ============= AUDIO CONTROL FUNCTIONS =============
-  
   const startTarhim = async () => {
     if (!tarhimAudioRef.current) return;
     
-    tarhimAudioRef.current.volume = isMuted ? 0 : volume / 100;
-    tarhimAudioRef.current.loop = true;
-    tarhimAudioRef.current.currentTime = 0;
-    
-    const playPromise = tarhimAudioRef.current.play();
-    
-    if (playPromise !== undefined) {
-      playPromise
-        .then(() => {
-          setIsTarhimPlaying(true);
-          console.log('✅ Tarhim diputar');
-          
-          if (audioRef.current && isPlaying) {
-            audioRef.current.pause();
-            setIsPlaying(false);
-          }
-        })
-        .catch(error => {
-          console.error('❌ Error playing tarhim:', error);
-          showToast('Gagal memutar tarhim', 'error');
-        });
+    try {
+      tarhimAudioRef.current.volume = isMuted ? 0 : volume / 100;
+      tarhimAudioRef.current.loop = true;
+      tarhimAudioRef.current.currentTime = 0;
+      
+      await tarhimAudioRef.current.play();
+      setIsTarhimPlaying(true);
+      console.log('✅ Tarhim diputar');
+      
+      if (audioRef.current && isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      }
+    } catch (error) {
+      console.error('❌ Error playing tarhim:', error);
+      showToast('Gagal memutar tarhim. Pastikan Anda sudah berinteraksi dengan halaman.', 'error');
     }
   };
 
@@ -646,7 +591,6 @@ const Adzan = ({ isDarkMode = false }) => {
       tarhimAudioRef.current.currentTime = 0;
       setIsTarhimPlaying(false);
       console.log('⏹️ Tarhim dihentikan');
-      
       await logTarhimToDatabase(true, stoppedEarly);
     }
   };
@@ -660,33 +604,35 @@ const Adzan = ({ isDarkMode = false }) => {
     
     setIsLoading(true);
     
-    audioRef.current.volume = isMuted ? 0 : volume / 100;
-    audioRef.current.currentTime = 0;
-    
-    const playPromise = audioRef.current.play();
-    
-    if (playPromise !== undefined) {
-      playPromise
-        .then(async () => {
-          setIsPlaying(true);
-          setIsLoading(false);
-          console.log('✅ Adzan diputar');
-          
-          const prayerName = prayer?.id || 'manual';
-          await logAdzanToDatabase(prayerName, !!prayer);
-          
-          if (prayer) {
-            console.log(`🕌 Adzan ${prayer.name} (${prayer.time}) diputar`);
-          } else {
-            console.log('🕌 Adzan diputar secara manual');
-          }
-        })
-        .catch(error => {
-          console.error('❌ Gagal memutar adzan:', error);
-          setIsPlaying(false);
-          setIsLoading(false);
-          showToast('Gagal memutar adzan', 'error');
-        });
+    try {
+      audioRef.current.volume = isMuted ? 0 : volume / 100;
+      audioRef.current.currentTime = 0;
+      
+      // Browser policy: audio.play() harus dari user interaction
+      await audioRef.current.play();
+      
+      setIsPlaying(true);
+      setIsLoading(false);
+      console.log('✅ Adzan diputar');
+      
+      const prayerName = prayer?.id || 'manual';
+      await logAdzanToDatabase(prayerName, !!prayer);
+      
+      if (prayer) {
+        console.log(`🕌 Adzan ${prayer.name} (${prayer.time}) diputar`);
+      } else {
+        console.log('🕌 Adzan diputar secara manual');
+      }
+    } catch (error) {
+      console.error('❌ Gagal memutar adzan:', error);
+      setIsPlaying(false);
+      setIsLoading(false);
+      
+      if (error.name === 'NotAllowedError') {
+        showToast('Browser memblokir autoplay. Klik tombol play untuk memutar.', 'error');
+      } else {
+        showToast('Gagal memutar adzan', 'error');
+      }
     }
   };
 
@@ -700,32 +646,14 @@ const Adzan = ({ isDarkMode = false }) => {
 
   const stopAdhan = async () => {
     if (audioRef.current) {
-      const durationPlayed = Math.floor(audioRef.current.currentTime);
-      
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
       setIsPlaying(false);
       console.log('⏹️ Adzan dihentikan');
-      
-      const currentPrayer = nextPrayer?.id || 'unknown';
-      await dbService.logAdzanPlayed(currentPrayer, false, volume, durationPlayed, false);
-    }
-  };
-
-  const skipToNextPrayer = () => {
-    if (nextPrayer) {
-      showToast(`Menuju waktu ${nextPrayer.name}`, 'info');
-      if (isPlaying) {
-        stopAdhan();
-      }
-      if (isTarhimPlaying) {
-        stopTarhim(true);
-      }
     }
   };
 
   // ============= SETTINGS HANDLERS =============
-  
   const handleVolumeChange = async (newVolume) => {
     setVolume(newVolume);
     await saveToDatabase('volume', newVolume);
@@ -795,34 +723,9 @@ const Adzan = ({ isDarkMode = false }) => {
     showToast('Jadwal dikembalikan ke perhitungan otomatis', 'success');
   };
 
-  // ============= DEBUG FUNCTION =============
+  // ============= EFFECTS =============
   
-  const testSystem = async () => {
-    console.log('🧪 TEST SISTEM ADZAN');
-    console.log('=====================');
-    console.log('Database Status:', dbStatus);
-    console.log('User Settings:', await dbService.getUserSettings());
-    console.log('Daily Stats:', dailyStats);
-    console.log('Last Adzan:', lastAdzan);
-    console.log('Last Tarhim:', lastTarhim);
-    console.log('Recent Activities:', recentActivities);
-    console.log('Waktu sekarang:', formatTime(new Date()));
-    console.log('Auto play:', autoPlay ? 'AKTIF' : 'NONAKTIF');
-    console.log('Auto tarhim:', autoTarhim ? 'AKTIF' : 'NONAKTIF');
-    console.log('Volume:', isMuted ? 'MUTE' : volume + '%');
-    console.log('Audio loaded:', audioLoaded ? 'YA' : 'TIDAK');
-    console.log('Tarhim loaded:', tarhimLoaded ? 'YA' : 'TIDAK');
-    console.log('Jadwal shalat:', prayerTimes);
-    console.log('Shalat berikutnya:', nextPrayer);
-    console.log('Waktu tarhim:', formatTarhimTime());
-    console.log('Notifikasi:', notificationPermission);
-    console.log('=====================');
-    
-    showToast('Debug info ditampilkan di console', 'info');
-  };
-
-  // ============= MAIN TIMER EFFECT =============
-  
+  // Main timer
   useEffect(() => {
     calculatePrayerTimes();
     
@@ -841,7 +744,6 @@ const Adzan = ({ isDarkMode = false }) => {
       if (currentSeconds === 0) {
         checkAdhanTime();
         checkTarhimTime();
-        checkPrayerNotifications();
       }
     }, 1000);
     
@@ -855,7 +757,7 @@ const Adzan = ({ isDarkMode = false }) => {
     };
   }, [autoPlay, autoTarhim, tarhimDuration, manualTimes, useManualTimes, city]);
 
-  // Load data saat komponen mount
+  // Load data
   useEffect(() => {
     loadAllFromDatabase();
     
@@ -873,7 +775,14 @@ const Adzan = ({ isDarkMode = false }) => {
 
   // Check notification permission
   useEffect(() => {
-    setNotificationPermission(Notification.permission);
+    if ('Notification' in window) {
+      setNotificationPermission(Notification.permission);
+      
+      // Auto setup if already granted
+      if (Notification.permission === 'granted') {
+        setupFirebaseNotifications();
+      }
+    }
   }, []);
 
   // Preload audio
@@ -884,9 +793,6 @@ const Adzan = ({ isDarkMode = false }) => {
         setAudioLoaded(true);
         console.log('✅ Audio Adzan siap diputar');
       });
-      audioRef.current.addEventListener('error', (e) => {
-        console.error('❌ Error loading adzan audio:', e);
-      });
     }
     
     if (tarhimAudioRef.current) {
@@ -895,100 +801,38 @@ const Adzan = ({ isDarkMode = false }) => {
         setTarhimLoaded(true);
         console.log('✅ Audio Tarhim siap diputar');
       });
-      tarhimAudioRef.current.addEventListener('error', (e) => {
-        console.error('❌ Error loading tarhim audio:', e);
-      });
     }
   }, []);
 
-  // Reset last played prayer setiap hari
-  useEffect(() => {
-    const resetTimer = setInterval(() => {
-      const now = new Date();
-      if (now.getHours() === 0 && now.getMinutes() === 0 && now.getSeconds() === 0) {
-        setLastPlayedPrayer(null);
+  // Update countdowns
+  const updateCountdowns = () => {
+    const now = new Date();
+    
+    const updatedTimes = prayerTimes.map(prayer => {
+      const newTimeLeft = Math.floor((prayer.fullTime - now) / 1000);
+      
+      if (newTimeLeft < 0) {
+        const newPrayerDate = new Date(prayer.fullTime);
+        newPrayerDate.setDate(newPrayerDate.getDate() + 1);
+        const updatedTimeLeft = Math.floor((newPrayerDate - now) / 1000);
+        
+        return {
+          ...prayer,
+          fullTime: newPrayerDate,
+          timeLeft: updatedTimeLeft
+        };
       }
-    }, 60000);
+      
+      return {
+        ...prayer,
+        timeLeft: newTimeLeft
+      };
+    }).sort((a, b) => a.fullTime - b.fullTime);
     
-    return () => clearInterval(resetTimer);
-  }, []);
-
-  // ============= STATS DISPLAY COMPONENT =============
-  
-  const StatsDisplay = () => {
-    if (!dailyStats) return null;
+    setPrayerTimes(updatedTimes);
     
-    return (
-      <div className={`mt-4 p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-        <div className="flex items-center justify-between mb-3">
-          <h4 className={`font-medium flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
-            <Database size={16} className={dbStatus === 'connected' ? 'text-green-500' : dbStatus === 'synced' ? 'text-blue-500' : 'text-yellow-500'} />
-            Statistik Hari Ini
-            {dbStatus === 'synced' && <span className="text-xs text-green-500">✓ Tersimpan</span>}
-            {dbStatus === 'error' && <span className="text-xs text-red-500">⚠ Gagal sync</span>}
-          </h4>
-          <button
-            onClick={() => setShowStats(!showStats)}
-            className={`text-xs px-2 py-1 rounded ${isDarkMode ? 'bg-gray-600 hover:bg-gray-500' : 'bg-gray-200 hover:bg-gray-300'}`}
-          >
-            {showStats ? 'Sembunyikan' : 'Detail'}
-          </button>
-        </div>
-        
-        <div className="grid grid-cols-3 gap-2 text-center">
-          <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
-            <div className="text-2xl font-bold text-emerald-500">{dailyStats.adzan_count || 0}</div>
-            <div className="text-xs">Adzan</div>
-          </div>
-          <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
-            <div className="text-2xl font-bold text-blue-500">{dailyStats.tarhim_count || 0}</div>
-            <div className="text-xs">Tarhim</div>
-          </div>
-          <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
-            <div className="text-2xl font-bold text-purple-500">
-              {(dailyStats.subuh_count || 0) + (dailyStats.dzuhur_count || 0) + 
-               (dailyStats.ashar_count || 0) + (dailyStats.maghrib_count || 0) + 
-               (dailyStats.isya_count || 0)}
-            </div>
-            <div className="text-xs">Total</div>
-          </div>
-        </div>
-        
-        {showStats && (
-          <>
-            <div className="mt-3 grid grid-cols-5 gap-1 text-xs">
-              <div className="text-center">
-                <div className="font-medium">Subuh</div>
-                <div className="text-emerald-500 font-bold">{dailyStats.subuh_count || 0}</div>
-              </div>
-              <div className="text-center">
-                <div className="font-medium">Dzuhur</div>
-                <div className="text-emerald-500 font-bold">{dailyStats.dzuhur_count || 0}</div>
-              </div>
-              <div className="text-center">
-                <div className="font-medium">Ashar</div>
-                <div className="text-emerald-500 font-bold">{dailyStats.ashar_count || 0}</div>
-              </div>
-              <div className="text-center">
-                <div className="font-medium">Maghrib</div>
-                <div className="text-emerald-500 font-bold">{dailyStats.maghrib_count || 0}</div>
-              </div>
-              <div className="text-center">
-                <div className="font-medium">Isya</div>
-                <div className="text-emerald-500 font-bold">{dailyStats.isya_count || 0}</div>
-              </div>
-            </div>
-            
-            {lastAdzan && (
-              <div className="mt-2 text-xs text-gray-500 border-t pt-2">
-                <div>Terakhir: {new Date(lastAdzan.played_at).toLocaleTimeString('id-ID')}</div>
-                {lastAdzan.prayer_name && <div>Shalat: {lastAdzan.prayer_name}</div>}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    );
+    const next = updatedTimes.find(p => p.timeLeft > 0) || updatedTimes[0];
+    setNextPrayer(next);
   };
 
   // ============= RENDER =============
@@ -1055,7 +899,32 @@ const Adzan = ({ isDarkMode = false }) => {
         }}
       />
       
-      {/* Settings Modal with Portal */}
+      {/* Install PWA Prompt */}
+      {showInstallPrompt && !isPwaInstalled && (
+        <div className={`mb-4 p-4 rounded-lg border ${
+          isDarkMode 
+            ? 'bg-purple-900/30 border-purple-700 text-purple-300' 
+            : 'bg-purple-50 border-purple-200 text-purple-800'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Smartphone size={24} className="text-purple-500" />
+              <div>
+                <p className="font-medium">Install Aplikasi Adzan</p>
+                <p className="text-sm opacity-90">Dapatkan notifikasi lebih baik dengan menginstall aplikasi</p>
+              </div>
+            </div>
+            <button
+              onClick={handleInstallPWA}
+              className="px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600"
+            >
+              Install
+            </button>
+          </div>
+        </div>
+      )}
+      
+      {/* Settings Modal */}
       <Modal isOpen={showSettings} onClose={() => setShowSettings(false)} isDarkMode={isDarkMode}>
         <div className="flex items-center justify-between mb-4">
           <h3 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
@@ -1070,33 +939,16 @@ const Adzan = ({ isDarkMode = false }) => {
         </div>
         
         <div className="space-y-4">
-          {/* Database Status */}
-          <div className={`p-3 rounded-lg ${
-            dbStatus === 'connected' ? 'bg-green-900/20 text-green-400' : 
-            dbStatus === 'synced' ? 'bg-blue-900/20 text-blue-400' : 
-            'bg-yellow-900/20 text-yellow-400'
-          }`}>
-            <div className="flex items-center gap-2">
-              <Database size={16} />
-              <span className="text-sm font-medium">
-                {dbStatus === 'connected' ? 'Terhubung ke database' : 
-                 dbStatus === 'synced' ? 'Data tersimpan' : 
-                 dbStatus === 'loading' ? 'Memuat data...' : 
-                 'Gagal terhubung'}
-              </span>
-            </div>
-          </div>
-
           {/* Notification Settings */}
-          <div className={`p-3 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
-            <div className="flex items-center justify-between">
+          <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+            <div className="flex items-center justify-between mb-3">
               <div>
                 <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Notifikasi Waktu Shalat</div>
                 <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                   {notificationPermission === 'granted' 
-                    ? 'Aktif - Anda akan diberitahu saat waktu shalat' 
+                    ? '✓ Notifikasi aktif - Anda akan mendapat notifikasi meskipun browser ditutup' 
                     : notificationPermission === 'denied'
-                    ? 'Ditolak - Aktifkan di pengaturan browser'
+                    ? '✗ Ditolak - Aktifkan di pengaturan browser'
                     : 'Klik tombol untuk mengaktifkan notifikasi'}
                 </div>
               </div>
@@ -1128,34 +980,70 @@ const Adzan = ({ isDarkMode = false }) => {
               </button>
             </div>
             
-            {notificationPermission !== 'denied' && (
-              <div className={`mt-3 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                <div className="flex items-center gap-1 mb-1">
-                  <BellRing size={12} />
-                  <span>Anda akan menerima notifikasi untuk:</span>
+            {fcmToken && (
+              <div className="mt-2 p-2 bg-blue-900/20 rounded text-xs">
+                <div className="flex items-center gap-1 text-blue-400 mb-1">
+                  <CheckCircle size={12} />
+                  <span>Firebase Connected</span>
                 </div>
-                <ul className="list-disc pl-4 space-y-1">
-                  <li>15 menit sebelum setiap waktu shalat</li>
-                  <li>5 menit sebelum setiap waktu shalat</li>
-                  <li>Saat waktu shalat tiba</li>
-                  <li>Tarhim sebelum Subuh (jika diaktifkan)</li>
-                </ul>
+                <p className="text-gray-500 break-all">Token: {fcmToken.substring(0, 30)}...</p>
               </div>
             )}
             
-            {notificationPermission === 'denied' && (
-              <div className="mt-3 p-2 bg-yellow-900/30 text-yellow-300 rounded text-xs">
-                <AlertCircle size={12} className="inline mr-1" />
-                Notifikasi diblokir oleh browser. Untuk mengaktifkan:
-                <ol className="list-decimal pl-4 mt-1">
-                  <li>Klik ikon gembok di address bar</li>
-                  <li>Cari "Notifikasi" atau "Notifications"</li>
-                  <li>Ubah menjadi "Izinkan" atau "Allow"</li>
-                  <li>Refresh halaman ini</li>
-                </ol>
+            <div className={`mt-3 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+              <div className="flex items-center gap-1 mb-1">
+                <BellRing size={12} />
+                <span className="font-medium">Mode Notifikasi:</span>
               </div>
-            )}
+              <ul className="list-disc pl-4 space-y-1">
+                <li className="text-emerald-500">✅ Browser tertutup → Notifikasi muncul</li>
+                <li className="text-yellow-500">⚠️ Browser tertutup → TIDAK bisa putar audio</li>
+                <li className="text-blue-500">📱 Klik notifikasi → Buka app & putar audio</li>
+              </ul>
+            </div>
           </div>
+
+          {/* Audio Playback Info */}
+          <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-yellow-50'}`}>
+            <div className="flex items-center gap-2 mb-2">
+              <Volume2 size={16} className="text-yellow-500" />
+              <span className="font-medium">Info Audio Background</span>
+            </div>
+            <p className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+              Audio adzan dan tarhim <span className="font-bold text-red-500">HANYA</span> dapat diputar saat aplikasi terbuka. 
+              Ini adalah kebijakan keamanan browser yang tidak bisa diubah.
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+              <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                <div className="font-medium">App Terbuka</div>
+                <div className="text-emerald-500">✅ Audio bisa</div>
+              </div>
+              <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                <div className="font-medium">App Tertutup</div>
+                <div className="text-red-500">❌ Audio tidak bisa</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Install PWA Info */}
+          {!isPwaInstalled && (
+            <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-purple-50'}`}>
+              <div className="flex items-center gap-2 mb-2">
+                <Smartphone size={16} className="text-purple-500" />
+                <span className="font-medium">Install Aplikasi</span>
+              </div>
+              <p className={`text-sm mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                Install sebagai aplikasi untuk notifikasi yang lebih baik dan akses cepat.
+              </p>
+              <button
+                onClick={handleInstallPWA}
+                className="w-full py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 flex items-center justify-center gap-2"
+              >
+                <ExternalLink size={16} />
+                Install Aplikasi
+              </button>
+            </div>
+          )}
 
           {/* Durasi Tarhim */}
           <div>
@@ -1177,9 +1065,6 @@ const Adzan = ({ isDarkMode = false }) => {
                 {tarhimDuration} mnt
               </span>
             </div>
-            <p className={`text-xs mt-1 ${isDarkMode ? 'text-gray-500' : 'text-gray-500'}`}>
-              Tarhim akan dimulai {tarhimDuration} menit sebelum waktu subuh
-            </p>
           </div>
           
           {/* Auto Tarhim Toggle */}
@@ -1189,7 +1074,7 @@ const Adzan = ({ isDarkMode = false }) => {
             <div>
               <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Auto Tarhim</div>
               <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Putar tarhim sebelum subuh
+                Putar tarhim sebelum subuh (saat app terbuka)
               </div>
             </div>
             <button
@@ -1212,7 +1097,7 @@ const Adzan = ({ isDarkMode = false }) => {
             <div>
               <div className={`font-medium ${isDarkMode ? 'text-gray-200' : ''}`}>Auto Adzan</div>
               <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Putar adzan otomatis
+                Putar adzan otomatis (saat app terbuka)
               </div>
             </div>
             <button
@@ -1263,14 +1148,14 @@ const Adzan = ({ isDarkMode = false }) => {
             <h2 className={`text-2xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
               Adzan & Jadwal Shalat
             </h2>
-            <div className="flex items-center gap-3 mt-1">
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
               <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                Pengingat waktu shalat dan adzan otomatis
+                Pengingat waktu shalat
               </p>
               {!isOnline && (
                 <span className="text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-800">
                   <WifiOff size={10} className="inline mr-1" />
-                  Offline Mode
+                  Offline
                 </span>
               )}
               {notificationPermission === 'granted' && (
@@ -1279,14 +1164,12 @@ const Adzan = ({ isDarkMode = false }) => {
                   Notifikasi Aktif
                 </span>
               )}
-              <button
-                onClick={testSystem}
-                className="text-xs px-2 py-1 rounded bg-gray-500 text-white hover:bg-gray-600"
-                title="Debug info"
-              >
-                <HelpCircle size={12} className="inline mr-1" />
-                Debug
-              </button>
+              {isPwaInstalled && (
+                <span className="text-xs px-2 py-1 rounded bg-purple-100 text-purple-800">
+                  <Smartphone size={10} className="inline mr-1" />
+                  Terinstall
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -1337,6 +1220,27 @@ const Adzan = ({ isDarkMode = false }) => {
         </div>
       </div>
 
+      {/* Background Mode Info */}
+      <div className={`mb-4 p-3 rounded-lg ${
+        document.visibilityState === 'visible'
+          ? isDarkMode ? 'bg-green-900/20 text-green-300' : 'bg-green-50 text-green-800'
+          : isDarkMode ? 'bg-yellow-900/20 text-yellow-300' : 'bg-yellow-50 text-yellow-800'
+      }`}>
+        <div className="flex items-center gap-2">
+          {document.visibilityState === 'visible' ? (
+            <>
+              <CheckCircle size={16} />
+              <span className="text-sm font-medium">Aplikasi Terbuka - Audio siap diputar</span>
+            </>
+          ) : (
+            <>
+              <AlertCircle size={16} />
+              <span className="text-sm font-medium">Aplikasi di Background - Hanya notifikasi (audio tidak bisa diputar)</span>
+            </>
+          )}
+        </div>
+      </div>
+
       {/* Current Time & Date */}
       <div className={`rounded-xl p-4 mb-6 shadow-sm ${
         isDarkMode ? 'bg-gray-800' : 'bg-white'
@@ -1365,25 +1269,42 @@ const Adzan = ({ isDarkMode = false }) => {
         </div>
       </div>
 
-      {/* Status Bar */}
-      <div className={`mb-4 px-4 py-2 rounded-lg text-sm flex items-center justify-between ${
-        audioLoaded && tarhimLoaded
-          ? isDarkMode ? 'bg-green-900/30 text-green-300' : 'bg-green-100 text-green-700'
-          : isDarkMode ? 'bg-yellow-900/30 text-yellow-300' : 'bg-yellow-100 text-yellow-700'
-      }`}>
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${audioLoaded && tarhimLoaded ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
-          <span>
-            {audioLoaded && tarhimLoaded 
-              ? '✓ Audio siap - Adzan dan Tarhim akan berbunyi otomatis pada waktunya' 
-              : '⏳ Memuat audio...'}
-          </span>
-        </div>
-        {isLoadingDb && <span className="text-xs">Menyimpan...</span>}
-      </div>
-
       {/* Stats Display */}
-      {showStats && <StatsDisplay />}
+      {showStats && dailyStats && (
+        <div className={`mb-4 p-4 rounded-lg ${isDarkMode ? 'bg-gray-800' : 'bg-white'}`}>
+          <div className="flex items-center justify-between mb-3">
+            <h4 className={`font-medium flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
+              <Database size={16} />
+              Statistik Hari Ini
+            </h4>
+          </div>
+          
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+              <div className="text-2xl font-bold text-emerald-500">{dailyStats.adzan_count || 0}</div>
+              <div className="text-xs">Adzan</div>
+            </div>
+            <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+              <div className="text-2xl font-bold text-blue-500">{dailyStats.tarhim_count || 0}</div>
+              <div className="text-xs">Tarhim</div>
+            </div>
+            <div className={`p-2 rounded ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+              <div className="text-2xl font-bold text-purple-500">
+                {(dailyStats.subuh_count || 0) + (dailyStats.dzuhur_count || 0) + 
+                 (dailyStats.ashar_count || 0) + (dailyStats.maghrib_count || 0) + 
+                 (dailyStats.isya_count || 0)}
+              </div>
+              <div className="text-xs">Total</div>
+            </div>
+          </div>
+          
+          {lastAdzan && (
+            <div className="mt-2 text-xs text-gray-500">
+              Terakhir: {new Date(lastAdzan.played_at).toLocaleTimeString('id-ID')}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
         {/* Left: Player Controls */}
@@ -1409,7 +1330,6 @@ const Adzan = ({ isDarkMode = false }) => {
                       </div>
                       <div className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
                         Mulai pukul <span className="font-bold">{formatTarhimTime()}</span>
-                        {autoTarhim && ` (${tarhimDuration} menit sebelum Subuh)`}
                       </div>
                     </div>
                   </div>
@@ -1431,10 +1351,11 @@ const Adzan = ({ isDarkMode = false }) => {
                   {!isTarhimPlaying ? (
                     <button
                       onClick={startTarhim}
-                      disabled={!tarhimLoaded}
+                      disabled={!tarhimLoaded || document.visibilityState !== 'visible'}
                       className="flex-1 py-2 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 transition-colors disabled:opacity-50"
+                      title={document.visibilityState !== 'visible' ? 'Buka aplikasi untuk memutar' : ''}
                     >
-                      Putar Tarhim Sekarang
+                      {document.visibilityState !== 'visible' ? 'Buka Aplikasi' : 'Putar Tarhim Sekarang'}
                     </button>
                   ) : (
                     <button
@@ -1443,11 +1364,6 @@ const Adzan = ({ isDarkMode = false }) => {
                     >
                       Hentikan Tarhim
                     </button>
-                  )}
-                  {!isTarhimPlaying && calculateTimeToTarhim() > 0 && (
-                    <div className={`flex-1 py-2 text-center text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                      {formatCountdown(calculateTimeToTarhim())}
-                    </div>
                   )}
                 </div>
               </div>
@@ -1470,8 +1386,9 @@ const Adzan = ({ isDarkMode = false }) => {
               
               <button
                 onClick={isPlaying ? pauseAdhan : playAdhan}
-                disabled={isLoading || !audioLoaded}
+                disabled={isLoading || !audioLoaded || document.visibilityState !== 'visible'}
                 className="w-16 h-16 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full flex items-center justify-center hover:opacity-90 disabled:opacity-50 transition-opacity shadow-lg"
+                title={document.visibilityState !== 'visible' ? 'Buka aplikasi untuk memutar' : ''}
               >
                 {isLoading ? (
                   <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
@@ -1562,8 +1479,9 @@ const Adzan = ({ isDarkMode = false }) => {
           <div className="flex gap-3">
             <button
               onClick={() => playAdhan()}
-              disabled={isPlaying || !audioLoaded}
+              disabled={isPlaying || !audioLoaded || document.visibilityState !== 'visible'}
               className="flex-1 bg-emerald-500 text-white py-2.5 rounded-lg font-medium hover:bg-emerald-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title={document.visibilityState !== 'visible' ? 'Buka aplikasi untuk memutar' : ''}
             >
               Putar Adzan Sekarang
             </button>
@@ -1669,12 +1587,6 @@ const Adzan = ({ isDarkMode = false }) => {
                       {isNext && !hasPassed && (
                         <div className="text-xs text-blue-500 font-medium">● BERIKUTNYA</div>
                       )}
-                      {isFajr && autoTarhim && !hasPassed && (
-                        <div className="text-xs text-blue-500 font-medium flex items-center gap-1">
-                          <Music size={10} />
-                          Tarhim: {formatTarhimTime()}
-                        </div>
-                      )}
                     </div>
                   </div>
                   
@@ -1702,20 +1614,12 @@ const Adzan = ({ isDarkMode = false }) => {
             <div className="space-y-2">
               <div className={`flex items-center gap-2 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
                 <Bell size={14} />
-                <span>Adzan otomatis akan berbunyi tepat pada waktu shalat</span>
+                <span>Notifikasi akan muncul meskipun browser ditutup</span>
               </div>
-              {autoTarhim && (
-                <div className="flex items-center gap-2 text-sm text-blue-500">
-                  <Music size={14} />
-                  <span>Tarhim akan dimulai {tarhimDuration} menit sebelum Subuh</span>
-                </div>
-              )}
-              {notificationPermission === 'granted' && (
-                <div className="flex items-center gap-2 text-sm text-emerald-500">
-                  <CheckCircle size={14} />
-                  <span>Notifikasi aktif: 15 menit & 5 menit sebelum waktu shalat</span>
-                </div>
-              )}
+              <div className={`flex items-center gap-2 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                <Volume2 size={14} />
+                <span>Audio hanya bisa diputar saat aplikasi terbuka</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1793,19 +1697,6 @@ const Adzan = ({ isDarkMode = false }) => {
               <option value="Yogyakarta">Yogyakarta</option>
               <option value="Bali">Bali</option>
             </select>
-            
-            <div className={`mt-3 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-              <div className="flex items-center gap-2">
-                <Globe size={14} />
-                <span>{city} • GMT+7</span>
-                {!isOnline && (
-                  <span className="ml-2 text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-800">
-                    <WifiOff size={10} className="inline mr-1" />
-                    Offline
-                  </span>
-                )}
-              </div>
-            </div>
           </div>
 
           {/* Manual Time Inputs */}
@@ -1850,11 +1741,6 @@ const Adzan = ({ isDarkMode = false }) => {
                 </div>
               ))}
             </div>
-            <p className={`text-xs mt-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-600'}`}>
-              {useManualTimes 
-                ? 'Waktu shalat menggunakan setting manual' 
-                : 'Waktu shalat dihitung otomatis berdasarkan lokasi'}
-            </p>
           </div>
         </div>
       </div>
